@@ -45,32 +45,52 @@ const providerOptions: {
   {
     value: 'openai',
     label: 'OpenAI',
-    model: 'gpt-4.1-mini',
-    baseUrl: 'https://api.openai.com/v1',
+    model: '',
+    baseUrl: '',
     apiKeyPlaceholder: 'OpenAI API Key',
   },
   {
     value: 'claude',
     label: 'Claude',
-    model: 'claude-3-5-sonnet-latest',
-    baseUrl: 'https://api.anthropic.com',
+    model: '',
+    baseUrl: '',
     apiKeyPlaceholder: 'Anthropic API Key',
   },
   {
     value: 'ollama',
     label: 'Ollama',
-    model: 'llama3.1',
-    baseUrl: 'http://localhost:11434/v1',
+    model: '',
+    baseUrl: '',
     apiKeyPlaceholder: 'Optional API Key',
   },
   {
     value: 'vllm',
     label: 'vLLM',
-    model: 'Qwen/Qwen2.5-7B-Instruct',
-    baseUrl: 'http://localhost:8000/v1',
+    model: '',
+    baseUrl: '',
     apiKeyPlaceholder: 'Optional API Key',
   },
 ];
+
+const providerBaseUrlHints: Record<AIProvider, { placeholder: string; help: string }> = {
+  gemini: { placeholder: '', help: '' },
+  openai: {
+    placeholder: 'https://api.openai.com/v1',
+    help: 'Use the root OpenAI endpoint only (no /chat/completions). Leave blank to use the default.',
+  },
+  claude: {
+    placeholder: 'https://api.anthropic.com',
+    help: 'Anthropic endpoints expect the base domain only. Do not append /v1/messages; the app will handle the path.',
+  },
+  ollama: {
+    placeholder: 'http://localhost:11434/v1',
+    help: 'Point to your local Ollama server root. Keep custom routes out of the URL.',
+  },
+  vllm: {
+    placeholder: 'http://localhost:8000/v1',
+    help: 'Provide the OpenAI-compatible root endpoint exposed by vLLM.',
+  },
+};
 
 const getProviderOption = (provider: AIProvider) => {
   return providerOptions.find(option => option.value === provider) ?? providerOptions[0];
@@ -1303,7 +1323,7 @@ export default function App() {
                         value={aiConfig.model}
                         onChange={(e) => setAiConfig({...aiConfig, model: e.target.value})}
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                        placeholder={`e.g. ${currentProviderOption.model}`}
+                        placeholder={currentProviderOption.model ? `e.g. ${currentProviderOption.model}` : 'Enter model name'}
                       />
                     </div>
                     <div className="space-y-2">
@@ -1324,8 +1344,9 @@ export default function App() {
                           value={aiConfig.baseUrl}
                           onChange={(e) => setAiConfig({...aiConfig, baseUrl: e.target.value})}
                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                          placeholder={currentProviderOption.baseUrl}
+                          placeholder={providerBaseUrlHints[aiConfig.provider].placeholder || 'Enter base URL'}
                         />
+                        <p className="text-[11px] text-gray-500">{providerBaseUrlHints[aiConfig.provider].help}</p>
                       </div>
                     )}
                   </div>
