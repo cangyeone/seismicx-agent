@@ -1,0 +1,7 @@
+{
+  "name": "SeismicXAgent",
+  "description": "Advanced AI-powered seismological monitoring and analysis platform with local LLM support and model fine-tuning capabilities.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
