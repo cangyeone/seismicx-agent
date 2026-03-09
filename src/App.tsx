@@ -25,11 +25,56 @@ import { motion, AnimatePresence } from 'motion/react';
 import SeismicMap from './components/SeismicMap';
 import WaveformDisplay from './components/WaveformDisplay';
 import { fetchUSGSEvents } from './services/seismoService';
-import { SeismicEvent, analyzeSeismicRisk, suggestAssociationParams, performGeologicalAnalysis, formatTrainingData, optimizeSystem, designModelArchitecture, generateTrainingReport, processDirectoryForHDF5, analyzeDatasetStructure, DatasetAnalysis, importExternalData, processCLICommand, AIConfig } from './services/aiService';
-import { GoogleGenAI } from "@google/genai";
+import { SeismicEvent, analyzeSeismicRisk, suggestAssociationParams, performGeologicalAnalysis, formatTrainingData, optimizeSystem, designModelArchitecture, generateTrainingReport, processDirectoryForHDF5, analyzeDatasetStructure, DatasetAnalysis, importExternalData, processCLICommand, AIConfig, AIProvider } from './services/aiService';
 import Markdown from 'react-markdown';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const providerOptions: {
+  value: AIProvider;
+  label: string;
+  model: string;
+  baseUrl: string;
+  apiKeyPlaceholder: string;
+}[] = [
+  {
+    value: 'gemini',
+    label: 'Gemini',
+    model: 'gemini-3.1-pro-preview',
+    baseUrl: '',
+    apiKeyPlaceholder: 'Gemini API Key',
+  },
+  {
+    value: 'openai',
+    label: 'OpenAI',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKeyPlaceholder: 'OpenAI API Key',
+  },
+  {
+    value: 'claude',
+    label: 'Claude',
+    model: 'claude-3-5-sonnet-latest',
+    baseUrl: 'https://api.anthropic.com',
+    apiKeyPlaceholder: 'Anthropic API Key',
+  },
+  {
+    value: 'ollama',
+    label: 'Ollama',
+    model: 'llama3.1',
+    baseUrl: 'http://localhost:11434/v1',
+    apiKeyPlaceholder: 'Optional API Key',
+  },
+  {
+    value: 'vllm',
+    label: 'vLLM',
+    model: 'Qwen/Qwen2.5-7B-Instruct',
+    baseUrl: 'http://localhost:8000/v1',
+    apiKeyPlaceholder: 'Optional API Key',
+  },
+];
+
+const getProviderOption = (provider: AIProvider) => {
+  return providerOptions.find(option => option.value === provider) ?? providerOptions[0];
+};
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -39,6 +84,8 @@ export default function App() {
     baseUrl: '',
     apiKey: ''
   });
+
+  const currentProviderOption = getProviderOption(aiConfig.provider);
   const [events, setEvents] = useState<SeismicEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
@@ -84,14 +131,27 @@ export default function App() {
   const [importDescription, setImportDescription] = useState('FDSN query for regional events in the Cascadia zone.');
   const [importResult, setImportResult] = useState<any>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [importPlan, setImportPlan] = useState<any>(null);
 
   // CLI State
   const [cliCommand, setCliCommand] = useState('');
   const [cliHistory, setCliHistory] = useState<{cmd: string, resp: string}[]>([]);
   const [isCliProcessing, setIsCliProcessing] = useState(false);
+  const [cliOutput, setCliOutput] = useState<string[]>(['Welcome to SeismoAgent CLI. Type /help for available commands.']);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const cliScrollRef = useRef<HTMLDivElement>(null);
+  const cliEndRef = useRef<HTMLDivElement>(null);
+
+  const handleProviderChange = (provider: AIProvider) => {
+    const option = getProviderOption(provider);
+    setAiConfig(prev => ({
+      ...prev,
+      provider,
+      model: option.model,
+      baseUrl: option.baseUrl,
+    }));
+  };
 
   useEffect(() => {
     loadData();
@@ -1215,22 +1275,22 @@ export default function App() {
                     </div>
                     <div>
                       <h3 className="font-medium">AI Provider Configuration</h3>
-                      <p className="text-xs text-gray-500">Connect to Gemini, Ollama, or vLLM</p>
+                      <p className="text-xs text-gray-500">Connect to Gemini, OpenAI, Claude, Ollama, or vLLM</p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3">
-                    {['gemini', 'ollama', 'vllm'].map(p => (
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    {providerOptions.map(option => (
                       <button
-                        key={p}
-                        onClick={() => setAiConfig({...aiConfig, provider: p as any})}
+                        key={option.value}
+                        onClick={() => handleProviderChange(option.value)}
                         className={`py-3 rounded-xl border text-xs font-medium transition-all uppercase ${
-                          aiConfig.provider === p 
+                          aiConfig.provider === option.value 
                             ? 'bg-emerald-500 text-black border-emerald-500' 
                             : 'bg-white/5 border-white/10 text-gray-400 hover:border-white/20'
                         }`}
                       >
-                        {p}
+                        {option.label}
                       </button>
                     ))}
                   </div>
@@ -1243,10 +1303,20 @@ export default function App() {
                         value={aiConfig.model}
                         onChange={(e) => setAiConfig({...aiConfig, model: e.target.value})}
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                        placeholder="e.g. llama3, gemini-3.1-pro-preview"
+                        placeholder={`e.g. ${currentProviderOption.model}`}
                       />
                     </div>
-                    {(aiConfig.provider === 'ollama' || aiConfig.provider === 'vllm') && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-gray-500 uppercase tracking-widest">API Key</label>
+                      <input
+                        type="password"
+                        value={aiConfig.apiKey || ''}
+                        onChange={(e) => setAiConfig({...aiConfig, apiKey: e.target.value})}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
+                        placeholder={currentProviderOption.apiKeyPlaceholder}
+                      />
+                    </div>
+                    {aiConfig.provider !== 'gemini' && (
                       <div className="space-y-2">
                         <label className="text-[10px] text-gray-500 uppercase tracking-widest">Base URL</label>
                         <input 
@@ -1254,7 +1324,7 @@ export default function App() {
                           value={aiConfig.baseUrl}
                           onChange={(e) => setAiConfig({...aiConfig, baseUrl: e.target.value})}
                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                          placeholder="http://localhost:11434/v1"
+                          placeholder={currentProviderOption.baseUrl}
                         />
                       </div>
                     )}
