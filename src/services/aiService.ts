@@ -1,5 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
+export type AIProvider = 'gemini' | 'openai' | 'claude' | 'ollama' | 'vllm';
+
 export interface SeismicEvent {
   id: string;
   time: string;
@@ -12,21 +14,61 @@ export interface SeismicEvent {
 }
 
 export interface AIConfig {
-  provider: 'gemini' | 'ollama' | 'vllm';
+  provider: AIProvider;
   model: string;
   baseUrl?: string;
   apiKey?: string;
 }
 
+const getApiKey = (config: AIConfig) => {
+  if (config.apiKey) return config.apiKey;
+
+  if (config.provider === 'gemini') return process.env.GEMINI_API_KEY || "";
+  if (config.provider === 'openai') return process.env.OPENAI_API_KEY || "";
+  if (config.provider === 'claude') return process.env.ANTHROPIC_API_KEY || "";
+
+  return "";
+};
+
+const getBaseUrl = (config: AIConfig) => {
+  if (config.baseUrl) return config.baseUrl.replace(/\/$/, '');
+  if (config.provider === 'openai') return 'https://api.openai.com/v1';
+  if (config.provider === 'claude') return 'https://api.anthropic.com';
+  if (config.provider === 'ollama') return 'http://localhost:11434/v1';
+  if (config.provider === 'vllm') return 'http://localhost:8000/v1';
+  return '';
+};
+
 const getAIClient = (config: AIConfig) => {
   if (config.provider === 'gemini') {
-    return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || config.apiKey || "" });
+    return new GoogleGenAI({ apiKey: getApiKey(config) });
   }
-  // For Ollama/vLLM, we'll use fetch directly or a generic OpenAI-compatible pattern
   return null;
 };
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+const getJsonOnlyPrompt = (prompt: string) => `
+${prompt}
+
+Return only valid JSON.
+Do not wrap the response in markdown code fences.
+Do not include any extra explanation before or after the JSON.
+`.trim();
+
+const normalizeTextContent = (content: any): string => {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map(part => {
+      if (typeof part === 'string') return part;
+      if (typeof part?.text === 'string') return part.text;
+      return '';
+    })
+    .join('\n')
+    .trim();
+};
 
 const withRetry = async <T>(fn: () => Promise<T>, maxRetries: number = 3): Promise<T> => {
   let lastError: any;
@@ -35,7 +77,7 @@ const withRetry = async <T>(fn: () => Promise<T>, maxRetries: number = 3): Promi
       return await fn();
     } catch (error: any) {
       lastError = error;
-      const isRateLimit = error.message?.includes('429') || error.status === 429 || error.message?.includes('RESOURCE_EXHAUSTED');
+      const isRateLimit = error.message?.includes('429') || error.status === 429 || error.status === 529 || error.message?.includes('RESOURCE_EXHAUSTED');
       if (isRateLimit && i < maxRetries - 1) {
         const waitTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
         console.warn(`Rate limit hit, retrying in ${Math.round(waitTime)}ms... (Attempt ${i + 1}/${maxRetries})`);
@@ -63,22 +105,27 @@ export const callAI = async (prompt: string, config: AIConfig, isJson: boolean =
         } : undefined,
       });
       return isJson ? JSON.parse(response.text) : response.text;
-    } else {
-      // Ollama / vLLM (OpenAI compatible)
-      const url = config.baseUrl || (config.provider === 'ollama' ? 'http://localhost:11434/v1' : 'http://localhost:8000/v1');
-      const response = await fetch(`${url}/chat/completions`, {
+    }
+
+    if (config.provider === 'claude') {
+      const apiKey = getApiKey(config);
+      if (!apiKey) throw new Error("Claude API key is missing");
+
+      const response = await fetch(`${getBaseUrl(config)}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey || 'no-key'}`
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
           model: config.model,
-          messages: [{ role: 'user', content: prompt }],
-          response_format: isJson ? { type: 'json_object' } : undefined
+          max_tokens: 4096,
+          system: isJson ? 'Return only valid JSON with no markdown fences or extra text.' : undefined,
+          messages: [{ role: 'user', content: isJson ? getJsonOnlyPrompt(prompt) : prompt }]
         })
       });
-      
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         const error = new Error(errorData.error?.message || `AI Request failed with status ${response.status}`);
@@ -87,9 +134,43 @@ export const callAI = async (prompt: string, config: AIConfig, isJson: boolean =
       }
 
       const data = await response.json();
-      const text = data.choices[0].message.content;
+      const text = normalizeTextContent(data.content);
       return isJson ? JSON.parse(text) : text;
     }
+
+    const apiKey = getApiKey(config);
+    if (config.provider === 'openai' && !apiKey) {
+      throw new Error("OpenAI API key is missing");
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(`${getBaseUrl(config)}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: config.model,
+        messages: [{ role: 'user', content: isJson ? getJsonOnlyPrompt(prompt) : prompt }],
+        response_format: isJson && config.provider !== 'ollama' ? { type: 'json_object' } : undefined
+      })
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const error = new Error(errorData.error?.message || `AI Request failed with status ${response.status}`);
+      (error as any).status = response.status;
+      throw error;
+    }
+
+    const data = await response.json();
+    const text = normalizeTextContent(data.choices?.[0]?.message?.content);
+    return isJson ? JSON.parse(text) : text;
   });
 };
 
