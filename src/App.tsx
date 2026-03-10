@@ -19,93 +19,64 @@ import {
   Terminal,
   Download,
   Globe,
-  Plus
+  Plus,
+  Tag,
+  CheckCircle2,
+  Clock,
+  Edit3,
+  Save
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import SeismicMap from './components/SeismicMap';
 import WaveformDisplay from './components/WaveformDisplay';
+import WaveformLabeler from './components/WaveformLabeler';
 import { fetchUSGSEvents } from './services/seismoService';
-import { SeismicEvent, analyzeSeismicRisk, suggestAssociationParams, performGeologicalAnalysis, formatTrainingData, optimizeSystem, designModelArchitecture, generateTrainingReport, processDirectoryForHDF5, analyzeDatasetStructure, DatasetAnalysis, importExternalData, processCLICommand, AIConfig, AIProvider } from './services/aiService';
+import { SeismicEvent, analyzeSeismicRisk, suggestAssociationParams, performGeologicalAnalysis, formatTrainingData, optimizeSystem, designModelArchitecture, generateTrainingReport, processDirectoryForHDF5, analyzeDatasetStructure, DatasetAnalysis, importExternalData, processCLICommand, AIConfig } from './services/aiService';
+import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 
-const providerOptions: {
-  value: AIProvider;
-  label: string;
-  model: string;
-  baseUrl: string;
-  apiKeyPlaceholder: string;
-}[] = [
-  {
-    value: 'gemini',
-    label: 'Gemini',
-    model: 'gemini-3.1-pro-preview',
-    baseUrl: '',
-    apiKeyPlaceholder: 'Gemini API Key',
-  },
-  {
-    value: 'openai',
-    label: 'OpenAI',
-    model: '',
-    baseUrl: '',
-    apiKeyPlaceholder: 'OpenAI API Key',
-  },
-  {
-    value: 'claude',
-    label: 'Claude',
-    model: '',
-    baseUrl: '',
-    apiKeyPlaceholder: 'Anthropic API Key',
-  },
-  {
-    value: 'ollama',
-    label: 'Ollama',
-    model: '',
-    baseUrl: '',
-    apiKeyPlaceholder: 'Optional API Key',
-  },
-  {
-    value: 'vllm',
-    label: 'vLLM',
-    model: '',
-    baseUrl: '',
-    apiKeyPlaceholder: 'Optional API Key',
-  },
-];
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
-const providerBaseUrlHints: Record<AIProvider, { placeholder: string; help: string }> = {
-  gemini: { placeholder: '', help: '' },
-  openai: {
-    placeholder: 'https://api.openai.com/v1',
-    help: 'Use the root OpenAI endpoint only (no /chat/completions). Leave blank to use the default.',
-  },
-  claude: {
-    placeholder: 'https://api.anthropic.com',
-    help: 'Anthropic endpoints expect the base domain only. Do not append /v1/messages; the app will handle the path.',
-  },
-  ollama: {
-    placeholder: 'http://localhost:11434/v1',
-    help: 'Point to your local Ollama server root. Keep custom routes out of the URL.',
-  },
-  vllm: {
-    placeholder: 'http://localhost:8000/v1',
-    help: 'Provide the OpenAI-compatible root endpoint exposed by vLLM.',
-  },
-};
+interface LabelConfig {
+  eventTypes: { id: string; label: string }[];
+  phaseTypes: string[];
+  polarityTypes: { id: string; label: string }[];
+  qualityTypes: string[];
+  modelMapping: Record<number, string>;
+  savePath: string;
+}
 
-const getProviderOption = (provider: AIProvider) => {
-  return providerOptions.find(option => option.value === provider) ?? providerOptions[0];
+const INITIAL_LABEL_CONFIG: LabelConfig = {
+  eventTypes: [
+    { id: 'eq', label: '天然地震 (eq)' },
+    { id: 'ep', label: '爆破 (ep)' },
+    { id: 'ss', label: '塌陷 (ss)' }
+  ],
+  phaseTypes: ['Pg', 'Sg', 'Pn', 'Sn', 'P', 'S'],
+  polarityTypes: [
+    { id: 'U', label: '向上 (U)' },
+    { id: 'D', label: '向下 (D)' }
+  ],
+  qualityTypes: ['E', 'I', 'M'],
+  modelMapping: {
+    0: 'Pg',
+    1: 'Sg',
+    2: 'Pn',
+    3: 'Sn'
+  },
+  savePath: '/data/labels'
 };
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [labelConfig, setLabelConfig] = useState<LabelConfig>(INITIAL_LABEL_CONFIG);
+  const [showLabelConfig, setShowLabelConfig] = useState(false);
   const [aiConfig, setAiConfig] = useState<AIConfig>({
     provider: 'gemini',
     model: 'gemini-3.1-pro-preview',
     baseUrl: '',
     apiKey: ''
   });
-
-  const currentProviderOption = getProviderOption(aiConfig.provider);
   const [events, setEvents] = useState<SeismicEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
@@ -116,6 +87,8 @@ export default function App() {
   const [riskReport, setRiskReport] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<SeismicEvent | null>(null);
   const [eventGeology, setEventGeology] = useState<Record<string, string>>({});
+  const [labeledEvents, setLabeledEvents] = useState<Record<string, boolean>>({});
+  const [configText, setConfigText] = useState('');
   
   // New Settings
   const [detectionThreshold, setDetectionThreshold] = useState(0.7);
@@ -151,27 +124,14 @@ export default function App() {
   const [importDescription, setImportDescription] = useState('FDSN query for regional events in the Cascadia zone.');
   const [importResult, setImportResult] = useState<any>(null);
   const [isImporting, setIsImporting] = useState(false);
-  const [importPlan, setImportPlan] = useState<any>(null);
 
   // CLI State
   const [cliCommand, setCliCommand] = useState('');
   const [cliHistory, setCliHistory] = useState<{cmd: string, resp: string}[]>([]);
   const [isCliProcessing, setIsCliProcessing] = useState(false);
-  const [cliOutput, setCliOutput] = useState<string[]>(['Welcome to SeismoAgent CLI. Type /help for available commands.']);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const cliScrollRef = useRef<HTMLDivElement>(null);
-  const cliEndRef = useRef<HTMLDivElement>(null);
-
-  const handleProviderChange = (provider: AIProvider) => {
-    const option = getProviderOption(provider);
-    setAiConfig(prev => ({
-      ...prev,
-      provider,
-      model: option.model,
-      baseUrl: option.baseUrl,
-    }));
-  };
 
   useEffect(() => {
     loadData();
@@ -210,7 +170,16 @@ export default function App() {
         setEventGeology(prev => ({ ...prev, [event.id]: analysis }));
       } catch (error: any) {
         console.error("Geology analysis failed", error);
-        const isQuotaError = error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED');
+        const errorStr = JSON.stringify(error);
+        const isQuotaError = 
+          error.message?.includes('429') || 
+          error.status === 429 || 
+          error.code === 429 ||
+          error.message?.includes('RESOURCE_EXHAUSTED') ||
+          errorStr.includes('429') ||
+          errorStr.includes('RESOURCE_EXHAUSTED') ||
+          errorStr.includes('quota');
+          
         const errorMsg = isQuotaError 
           ? "⚠️ AI Quota Exceeded. Click here to retry." 
           : "⚠️ Analysis failed. Click here to retry.";
@@ -485,6 +454,7 @@ export default function App() {
           <NavItem icon={<Cpu />} active={activeTab === 'models'} onClick={() => setActiveTab('models')} label="Models" />
           <NavItem icon={<FileText />} active={activeTab === 'analysis'} onClick={() => setActiveTab('analysis')} label="Reports" />
           <NavItem icon={<Database />} active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} label="Data" />
+          <NavItem icon={<Tag />} active={activeTab === 'labeling'} onClick={() => setActiveTab('labeling')} label="Label" />
           <NavItem icon={<Terminal />} active={activeTab === 'cli'} onClick={() => setActiveTab('cli')} label="CLI" />
           <NavItem icon={<Settings />} active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} label="Config" />
         </div>
@@ -507,7 +477,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="p-8 max-w-7xl mx-auto">
+        <div className={`${activeTab === 'labeling' ? 'p-4' : 'p-8'} ${activeTab === 'labeling' ? 'max-w-none' : 'max-w-7xl'} mx-auto`}>
           <AnimatePresence mode="wait">
             {activeTab === 'dashboard' && (
               <motion.div 
@@ -1231,6 +1201,163 @@ export default function App() {
               </motion.div>
             )}
 
+            {activeTab === 'labeling' && (
+              <motion.div 
+                key="labeling"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="h-[calc(100vh-120px)] flex flex-col gap-6"
+              >
+                {/* Stats Header */}
+                <div className="grid grid-cols-4 gap-4">
+                  <div className="bg-white/5 border border-white/5 rounded-2xl p-4 flex flex-col items-center justify-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Total Events</div>
+                    <div className="text-2xl font-light text-white">{events.length}</div>
+                  </div>
+                  <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-2xl p-4 flex flex-col items-center justify-center">
+                    <div className="text-[10px] text-emerald-500 uppercase tracking-widest mb-1">Labeled</div>
+                    <div className="text-2xl font-light text-emerald-500">{Object.keys(labeledEvents).length}</div>
+                  </div>
+                  <div className="bg-white/5 border border-white/5 rounded-2xl p-4 flex flex-col items-center justify-center">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Pending</div>
+                    <div className="text-2xl font-light text-gray-400">{events.length - Object.keys(labeledEvents).length}</div>
+                  </div>
+                  <div className="bg-red-500/5 border border-red-500/10 rounded-2xl p-4 flex flex-col items-center justify-center">
+                    <div className="text-[10px] text-red-500 uppercase tracking-widest mb-1">Significant (M5+)</div>
+                    <div className="text-2xl font-light text-red-500">{events.filter(e => e.magnitude >= 5).length}</div>
+                  </div>
+                </div>
+
+                <div className="flex-1 flex gap-6 min-h-0">
+                  {/* Left Sidebar: Global Settings + Event List */}
+                  <div className="w-80 flex flex-col gap-6 min-h-0">
+                    {/* Global Settings */}
+                    <div className="bg-white/5 border border-white/5 rounded-3xl flex flex-col overflow-hidden shrink-0">
+                      <div className="p-4 border-b border-white/5 bg-white/5 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Settings className="w-4 h-4 text-emerald-500" />
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400">Global Settings</h3>
+                        </div>
+                        <button 
+                          onClick={() => {
+                            setConfigText(JSON.stringify(labelConfig, null, 2));
+                            setShowLabelConfig(true);
+                          }}
+                          className="p-1.5 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-all"
+                        >
+                          <Edit3 className="w-3 h-3 text-gray-500" />
+                        </button>
+                      </div>
+                      <div className="p-4 space-y-4 bg-black/20">
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Save Path</label>
+                          <div className="flex items-center gap-2">
+                            <input 
+                              type="text" 
+                              value={labelConfig.savePath}
+                              onChange={(e) => setLabelConfig(prev => ({ ...prev, savePath: e.target.value }))}
+                              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-[10px] focus:outline-none focus:border-emerald-500/50 transition-colors"
+                            />
+                            <div className="w-6 h-6 rounded-lg bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                              <Save className="w-3 h-3 text-emerald-500" />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Phase Types</label>
+                          <div className="flex flex-wrap gap-1">
+                            {labelConfig.phaseTypes.map(p => (
+                              <span key={p} className="px-2 py-0.5 bg-blue-500/10 text-blue-400 rounded text-[9px] border border-blue-500/20">{p}</span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Quality Types</label>
+                          <div className="flex flex-wrap gap-1">
+                            {labelConfig.qualityTypes.map(q => (
+                              <span key={q} className="px-2 py-0.5 bg-purple-500/10 text-purple-400 rounded text-[9px] border border-purple-500/20">{q}</span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Event List */}
+                    <div className="flex-1 bg-white/5 border border-white/5 rounded-3xl flex flex-col overflow-hidden">
+                      <div className="p-4 border-b border-white/5 bg-white/5 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Database className="w-4 h-4 text-emerald-500" />
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400">Events</h3>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                        {events.map(e => (
+                          <button
+                            key={e.id}
+                            onClick={() => setSelectedEvent(e)}
+                            className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center gap-2.5 group ${
+                              selectedEvent?.id === e.id 
+                                ? 'bg-emerald-500 text-black shadow-lg shadow-emerald-500/20' 
+                                : labeledEvents[e.id]
+                                  ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20'
+                                  : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent'
+                            }`}
+                          >
+                            <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              selectedEvent?.id === e.id 
+                                ? 'bg-black' 
+                                : labeledEvents[e.id] ? 'bg-emerald-500' : 'bg-gray-600'
+                            }`} />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-1">
+                                <span className={`text-[10px] font-bold font-mono ${selectedEvent?.id === e.id ? 'text-black' : 'text-gray-300'}`}>M{e.magnitude}</span>
+                                <div className="flex items-center gap-2">
+                                  <div className={`flex items-center gap-1 text-[8px] px-1.5 py-0.5 rounded-full ${selectedEvent?.id === e.id ? 'bg-black/10 text-black' : 'bg-white/5 text-gray-500'}`}>
+                                    <Activity className="w-2.5 h-2.5" />
+                                    {e.waveformCount || 0} Traces
+                                  </div>
+                                  <span className={`text-[8px] opacity-60 ${selectedEvent?.id === e.id ? 'text-black' : ''}`}>{new Date(e.time).toLocaleDateString()}</span>
+                                </div>
+                              </div>
+                              <div className={`text-[9px] truncate ${selectedEvent?.id === e.id ? 'text-black/80' : 'text-gray-500'}`}>{e.place}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Main Content: Labeler (Settings + Waveforms) */}
+                  <div className="flex-1 min-w-0 flex flex-col">
+                    {selectedEvent ? (
+                      <WaveformLabeler 
+                        event={selectedEvent} 
+                        config={labelConfig}
+                        onSave={(meta, waves) => {
+                          setLabeledEvents(prev => ({ ...prev, [selectedEvent.id]: true }));
+                        }} 
+                        onNext={() => {
+                          const currentIndex = events.findIndex(e => e.id === selectedEvent.id);
+                          if (currentIndex < events.length - 1) {
+                            setSelectedEvent(events[currentIndex + 1]);
+                          }
+                        }}
+                        hasNext={events.findIndex(e => e.id === selectedEvent.id) < events.length - 1}
+                      />
+                    ) : (
+                      <div className="flex-1 bg-white/5 border border-white/5 rounded-3xl flex flex-col items-center justify-center text-center p-12 space-y-4 opacity-40">
+                        <Tag className="w-16 h-16" />
+                        <div className="max-w-xs">
+                          <h3 className="text-lg font-medium text-white">No Event Selected</h3>
+                          <p className="text-sm">Select an earthquake from the sidebar to start labeling seismic phases and first motions.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
             {activeTab === 'cli' && (
               <motion.div 
                 key="cli"
@@ -1295,22 +1422,22 @@ export default function App() {
                     </div>
                     <div>
                       <h3 className="font-medium">AI Provider Configuration</h3>
-                      <p className="text-xs text-gray-500">Connect to Gemini, OpenAI, Claude, Ollama, or vLLM</p>
+                      <p className="text-xs text-gray-500">Connect to Gemini, Ollama, or vLLM</p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                    {providerOptions.map(option => (
+                  <div className="grid grid-cols-5 gap-3">
+                    {['gemini', 'ollama', 'vllm', 'openai', 'claude'].map(p => (
                       <button
-                        key={option.value}
-                        onClick={() => handleProviderChange(option.value)}
-                        className={`py-3 rounded-xl border text-xs font-medium transition-all uppercase ${
-                          aiConfig.provider === option.value 
+                        key={p}
+                        onClick={() => setAiConfig({...aiConfig, provider: p as any})}
+                        className={`py-3 rounded-xl border text-[10px] font-medium transition-all uppercase ${
+                          aiConfig.provider === p 
                             ? 'bg-emerald-500 text-black border-emerald-500' 
                             : 'bg-white/5 border-white/10 text-gray-400 hover:border-white/20'
                         }`}
                       >
-                        {option.label}
+                        {p}
                       </button>
                     ))}
                   </div>
@@ -1323,20 +1450,10 @@ export default function App() {
                         value={aiConfig.model}
                         onChange={(e) => setAiConfig({...aiConfig, model: e.target.value})}
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                        placeholder={currentProviderOption.model ? `e.g. ${currentProviderOption.model}` : 'Enter model name'}
+                        placeholder="e.g. llama3, gemini-3.1-pro-preview"
                       />
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] text-gray-500 uppercase tracking-widest">API Key</label>
-                      <input
-                        type="password"
-                        value={aiConfig.apiKey || ''}
-                        onChange={(e) => setAiConfig({...aiConfig, apiKey: e.target.value})}
-                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                        placeholder={currentProviderOption.apiKeyPlaceholder}
-                      />
-                    </div>
-                    {aiConfig.provider !== 'gemini' && (
+                    {(aiConfig.provider === 'ollama' || aiConfig.provider === 'vllm') && (
                       <div className="space-y-2">
                         <label className="text-[10px] text-gray-500 uppercase tracking-widest">Base URL</label>
                         <input 
@@ -1344,9 +1461,8 @@ export default function App() {
                           value={aiConfig.baseUrl}
                           onChange={(e) => setAiConfig({...aiConfig, baseUrl: e.target.value})}
                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none"
-                          placeholder={providerBaseUrlHints[aiConfig.provider].placeholder || 'Enter base URL'}
+                          placeholder="http://localhost:11434/v1"
                         />
-                        <p className="text-[11px] text-gray-500">{providerBaseUrlHints[aiConfig.provider].help}</p>
                       </div>
                     )}
                   </div>
@@ -1402,6 +1518,60 @@ export default function App() {
             )}
           </AnimatePresence>
         </div>
+
+        {/* Global Label Config Modal */}
+        <AnimatePresence>
+          {showLabelConfig && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-[#1a1a1a] border border-white/10 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl"
+              >
+                <div className="p-6 border-b border-white/10 flex items-center justify-between bg-white/5">
+                  <div className="flex items-center gap-3">
+                    <Settings className="w-5 h-5 text-emerald-500" />
+                    <h3 className="font-medium text-white">Edit Global Labeling Configuration</h3>
+                  </div>
+                  <button 
+                    onClick={() => setShowLabelConfig(false)}
+                    className="p-2 hover:bg-white/10 rounded-xl transition-colors"
+                  >
+                    <Plus className="w-5 h-5 rotate-45 text-gray-400" />
+                  </button>
+                </div>
+                <div className="p-6 space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Configuration JSON</label>
+                    <textarea 
+                      className="w-full h-80 bg-black/40 border border-white/10 rounded-2xl p-4 font-mono text-xs text-emerald-400 focus:outline-none focus:border-emerald-500/50 resize-none"
+                      value={configText}
+                      onChange={(e) => setConfigText(e.target.value)}
+                    />
+                    <p className="text-[10px] text-gray-500 italic">Editing the JSON directly updates the global labeling parameters.</p>
+                  </div>
+                  <div className="flex justify-end gap-3">
+                    <button 
+                      onClick={() => {
+                        try {
+                          const newConfig = JSON.parse(configText);
+                          setLabelConfig(newConfig);
+                          setShowLabelConfig(false);
+                        } catch (err) {
+                          alert("Invalid JSON format. Please check your syntax.");
+                        }
+                      }}
+                      className="px-6 py-2 bg-emerald-500 text-black rounded-xl text-sm font-medium hover:bg-emerald-400 transition-all"
+                    >
+                      Apply & Close
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </main>
     </div>
   );

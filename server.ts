@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import { exec } from "child_process";
 
 const db = new Database("seismo.db");
 
@@ -46,6 +47,27 @@ async function startServer() {
   app.use(express.json());
 
   // API Routes
+  app.post("/api/import/local", (req, res) => {
+    const { path: filePath } = req.body;
+    if (!filePath) return res.status(400).json({ error: "Path is required" });
+
+    exec(`python3 import_seismic.py "${filePath}"`, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`exec error: ${error}`);
+        return res.status(500).json({ error: "Failed to execute import script" });
+      }
+      try {
+        const result = JSON.parse(stdout);
+        if (result.error) {
+          return res.status(400).json({ error: result.error });
+        }
+        res.json(result);
+      } catch (e) {
+        res.status(500).json({ error: "Failed to parse import script output" });
+      }
+    });
+  });
+
   app.get("/api/events", (req, res) => {
     const events = db.prepare("SELECT * FROM events ORDER BY time DESC LIMIT 100").all();
     res.json(events);
@@ -71,6 +93,36 @@ async function startServer() {
     const stmt = db.prepare("INSERT INTO knowledge_base (topic, content, tags) VALUES (?, ?, ?)");
     stmt.run(topic, content, tags);
     res.json({ success: true });
+  });
+
+  app.post("/api/save-labels", (req, res) => {
+    const { eventId, data, format, savePath } = req.body;
+    if (!eventId || !data || !savePath) return res.status(400).json({ error: "Missing required fields" });
+
+    try {
+      if (!fs.existsSync(savePath)) {
+        fs.mkdirSync(savePath, { recursive: true });
+      }
+
+      const filename = `seismic_labels_${eventId}_${new Date().getTime()}.${format}`;
+      const fullPath = path.join(savePath, filename);
+      
+      let content = '';
+      if (format === 'json') {
+        content = JSON.stringify(data, null, 2);
+      } else {
+        content = JSON.stringify({ type: 'metadata', ...data.metadata }) + '\n';
+        data.waveforms.forEach((w: any) => {
+          content += JSON.stringify({ type: 'waveform', ...w }) + '\n';
+        });
+      }
+
+      fs.writeFileSync(fullPath, content);
+      res.json({ success: true, path: fullPath });
+    } catch (error: any) {
+      console.error("Save failed", error);
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Proxy for FDSN services to avoid CORS

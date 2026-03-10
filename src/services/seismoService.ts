@@ -13,6 +13,7 @@ export const fetchUSGSEvents = async (startTime: string, endTime: string): Promi
     depth: f.geometry.coordinates[2],
     magnitude: f.properties.mag,
     place: f.properties.place,
+    waveformCount: Math.floor(Math.random() * 15) + 5, // Mock count between 5 and 20
   }));
 };
 
